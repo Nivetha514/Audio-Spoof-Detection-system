@@ -1,0 +1,159 @@
+import numpy as np
+import pandas as pd
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import LabelEncoder
+from sklearn.metrics import accuracy_score, f1_score, roc_curve, auc
+from tensorflow import keras
+from tensorflow.keras import layers, models
+from tensorflow.keras import Sequential
+import matplotlib.pyplot as plt
+
+# Load the extracted audio features from CSV
+data = pd.read_csv('DATASET-LA.csv')
+
+# Assuming your CSV has columns like 'feature_1', 'feature_2', ..., 'label'
+X = data.iloc[:, :-1].values
+y = data.iloc[:, -1].values
+
+# Encode the labels
+label_encoder = LabelEncoder()
+y = label_encoder.fit_transform(y)
+
+# Split the data into training and testing sets
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+
+# Reshape the input data for SqueezeNet
+X_train_reshaped = X_train.reshape((X_train.shape[0], X_train.shape[1], 1))
+X_test_reshaped = X_test.reshape((X_test.shape[0], X_test.shape[1], 1))
+
+# Define the SqueezeNet model
+def fire_module(x, squeeze, expand):
+    y = layers.Conv1D(filters=squeeze, kernel_size=1, activation='relu', padding='same')(x)
+    y1 = layers.Conv1D(filters=expand // 2, kernel_size=1, activation='relu', padding='same')(y)
+    y3 = layers.Conv1D(filters=expand // 2, kernel_size=3, activation='relu', padding='same')(y)
+    return layers.concatenate([y1, y3])
+
+def build_squeezenet(input_shape, num_classes):
+    x = layers.Input(shape=input_shape)
+
+    y = layers.Conv1D(64, kernel_size=3, activation='relu', padding='same')(x)
+    y = layers.MaxPooling1D(pool_size=2)(y)
+
+    y = fire_module(y, squeeze=16, expand=64)
+    y = fire_module(y, squeeze=16, expand=64)
+    y = layers.MaxPooling1D(pool_size=2)(y)
+
+    y = fire_module(y, squeeze=32, expand=128)
+    y = fire_module(y, squeeze=32, expand=128)
+    y = layers.MaxPooling1D(pool_size=2)(y)
+
+    y = fire_module(y, squeeze=48, expand=192)
+    y = fire_module(y, squeeze=48, expand=192)
+    y = fire_module(y, squeeze=64, expand=256)
+    y = fire_module(y, squeeze=64, expand=256)
+
+    y = layers.GlobalAveragePooling1D()(y)
+    y = layers.Dense(num_classes, activation='sigmoid')(y)
+
+    model = models.Model(x, y, name='squeezenet')
+    return model
+
+# Define the TDNN model
+model_tdnn = models.Sequential([
+    layers.Conv1D(64, kernel_size=3, activation='relu', input_shape=(X_train.shape[1], 1)),
+    layers.MaxPooling1D(pool_size=2),
+    layers.Conv1D(128, kernel_size=3, activation='relu'),
+    layers.MaxPooling1D(pool_size=2),
+    layers.Flatten(),
+    layers.Dense(256, activation='relu'),
+    layers.Dropout(0.5),
+    layers.Dense(1, activation='sigmoid')
+])
+
+# Define the RNN model
+model_rnn = models.Sequential([
+    layers.SimpleRNN(64, activation='relu', input_shape=(X_train.shape[1], 1)),
+    layers.Dense(128, activation='relu'),
+    layers.Dropout(0.5),
+    layers.Dense(1, activation='sigmoid')
+])
+
+# Build the SqueezeNet model
+model_squeezenet = build_squeezenet(input_shape=(X_train.shape[1], 1), num_classes=1)
+
+# Train each model
+models = [model_tdnn, model_rnn, model_squeezenet]
+for model in models:
+    model.compile(optimizer='adam', loss='binary_crossentropy', metrics=['accuracy'])
+    model.fit(X_train_reshaped, y_train, epochs=10, batch_size=32, validation_data=(X_test_reshaped, y_test))
+
+# Make predictions using each model
+predictions = np.zeros((len(X_test), len(models)))
+
+for i, model in enumerate(models):
+    predictions[:, i] = model.predict(X_test_reshaped).flatten()
+
+# Average the predictions
+average_predictions = np.mean(predictions, axis=1)
+ensemble_predictions = (average_predictions > 0.5).astype(int)
+
+# Evaluate the ensemble on the test set
+ensemble_accuracy = accuracy_score(y_test, ensemble_predictions)
+ensemble_f1 = f1_score(y_test, ensemble_predictions)
+
+# Calculate ROC curve for ensemble predictions
+fpr, tpr, _ = roc_curve(y_test, ensemble_predictions)
+roc_auc = auc(fpr, tpr)
+
+# Plot ROC curve
+plt.figure()
+plt.plot(fpr, tpr, color='darkorange', lw=2, label='Ensemble ROC curve (area = {:.2f})'.format(roc_auc))
+plt.plot([0, 1], [0, 1], color='navy', lw=2, linestyle='--')
+plt.xlim([0.0, 1.0])
+plt.ylim([0.0, 1.05])
+plt.xlabel('False Positive Rate')
+plt.ylabel('True Positive Rate')
+plt.title('Receiver Operating Characteristic (ROC) Curve')
+plt.legend(loc="lower right")
+plt.show()
+
+print(f'Ensemble Accuracy: {ensemble_accuracy}')
+print(f'Ensemble F1 Score: {ensemble_f1}')
+
+from sklearn.metrics import confusion_matrix
+from scipy.optimize import brentq
+from scipy.interpolate import interp1d
+
+# Function to calculate t-DCF
+def calculate_tDCF(tar_miss, tar_fa, p_tar, c_miss, c_fa):
+    tDCF = p_tar * (c_miss * tar_miss + c_fa * tar_fa)
+    return tDCF
+
+# Function to calculate EER
+def calculate_eer(fpr, fnr):
+    eer_threshold = min(fpr[np.nanargmin(np.abs(fpr - (1 - fnr)))], fnr[np.nanargmin(np.abs(fnr - (1 - fpr)))])
+    return eer_threshold
+
+# Calculate metrics for the ensemble model
+ensemble_accuracy = accuracy_score(y_test, ensemble_predictions)
+ensemble_f1 = f1_score(y_test, ensemble_predictions)
+
+# Calculate confusion matrix for ensemble predictions
+conf_matrix = confusion_matrix(y_test, ensemble_predictions)
+tar_miss = conf_matrix[1, 0] / (conf_matrix[1, 0] + conf_matrix[1, 1])  # False rejection rate
+tar_fa = conf_matrix[0, 1] / (conf_matrix[0, 1] + conf_matrix[0, 0])  # False acceptance rate
+
+# Define parameters for t-DCF
+P_target = 0.01
+C_miss = 1
+C_fa = 1
+
+# Calculate EER for ensemble predictions
+fpr, tpr, _ = roc_curve(y_test, ensemble_predictions)
+fnr = 1 - tpr
+eer_threshold = calculate_eer(fpr, fnr)
+print(f'Ensemble EER: {eer_threshold}')
+
+# Calculate t-DCF for ensemble predictions
+tDCF = calculate_tDCF(tar_miss, tar_fa, P_target, C_miss, C_fa)
+print(f'Ensemble t-DCF: {tDCF}')
