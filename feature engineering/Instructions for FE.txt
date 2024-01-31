@@ -1,0 +1,9 @@
+Steps to use feature extraction files:
+1. Choose the type of features being extracted and make the following changes in the respective .py script
+2. In the extract_featurename function set the correct file extension of audio files.
+3. Give the correct folder path containing the audio clips in the line folder_path 
+4. Make sure the metadata CSV file contains the target class column named Classname. If not make necessary changes about the column name and file path in the code in the line 
+metadata_df = pd.read_csv('metadata.csv', usecols=['Classname'])
+5. Now execute the .py script.
+
+
